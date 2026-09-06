@@ -1,19 +1,79 @@
-# Imports
+# -*- coding: utf-8 -*-
 
+import os
+import sys
 import numpy as np
 import datetime as dt
-import sys
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 
+# =========================
+# Configuration
+# =========================
+
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+TOKEN_FILE = "token.json"
+CREDENTIALS_FILE = "credentials.json"
+TIMEZONE = "Europe/Paris"
+
+DEFAULT_CALENDAR_ID = (
+    "2a075d8844c44bce6e2573676a195b31626de6e32649d7d93d0b5b06ddbdee1a@group.calendar.google.com"
+)
+
+
+# =========================
+# Google Calendar auth
+# =========================
+
+def get_calendar_service():
+    creds = None
+
+    if os.path.exists(TOKEN_FILE):
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        except Exception as e:
+            print(f"[WARN] Could not read {TOKEN_FILE}: {e}")
+            creds = None
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                print("[INFO] Google credentials refreshed.")
+            except Exception as e:
+                print(f"[WARN] Could not refresh token: {e}")
+                creds = None
+
+        if not creds:
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(
+                host="127.0.0.1",
+                port=8080,
+                authorization_prompt_message="Please visit this URL to authorize this application: {url}",
+                success_message="The authentication flow has completed. You may close this window.",
+                open_browser=True
+            )
+            print("[INFO] Google authentication completed.")
+
+        with open(TOKEN_FILE, "w", encoding="utf-8") as token:
+            token.write(creds.to_json())
+            print(f"[INFO] Token saved to {TOKEN_FILE}")
+
+    return build("calendar", "v3", credentials=creds)
+
+
+# =========================
 # Scrapes tides from SHOM
+# =========================
 
 def scrape_tides(start_date, num_days=10, harbor='SAINT-MALO'):
 
@@ -31,17 +91,17 @@ def scrape_tides(start_date, num_days=10, harbor='SAINT-MALO'):
             WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, '//table//tbody/tr[2]/td[2]')))
 
             for tide in range(2, 6):
-                x_path_hour = f'//*[@id="ember657"]/div/table/tbody/tr[{tide}]/td[2]'
+                x_path_hour = f'//*[@id="ember706"]/div/table/tbody/tr[{tide}]/td[2]'
                 tide_hour = driver.find_element(By.XPATH, x_path_hour).text
 
                 if tide_hour != '--:--':
                     time_obj = dt.datetime.strptime(tide_hour, '%H:%M').time()
                     combined_datetime = dt.datetime.combine(date_obj, time_obj)
 
-                    x_path_level = f'//*[@id="ember657"]/div/table/tbody/tr[{tide}]/td[3]'
+                    x_path_level = f'//*[@id="ember706"]/div/table/tbody/tr[{tide}]/td[3]'
                     tide_level = float(driver.find_element(By.XPATH, x_path_level).text)
 
-                    x_path_coeff = f'//*[@id="ember657"]/div/table/tbody/tr[{tide}]/td[4]'
+                    x_path_coeff = f'//*[@id="ember706"]/div/table/tbody/tr[{tide}]/td[4]'
                     try:
                         tide_coeff = int(driver.find_element(By.XPATH, x_path_coeff).text)
                     except Exception:
@@ -55,7 +115,9 @@ def scrape_tides(start_date, num_days=10, harbor='SAINT-MALO'):
     return slack_tides
 
 
+# =========================
 # Derives full tide curve
+# =========================
 
 def create_tide_curve(slack_tides):
 
@@ -64,13 +126,13 @@ def create_tide_curve(slack_tides):
     tide_x = []
     tide_y = []
 
-    for k in range(0,len(slack_tides)-1):
+    for k in range(0, len(slack_tides) - 1):
 
         start_timestamp = slack_tides[k][0].timestamp()
-        end_timestamp = slack_tides[k+1][0].timestamp()
+        end_timestamp = slack_tides[k + 1][0].timestamp()
 
         start_tide_level = slack_tides[k][1]
-        end_tide_level = slack_tides[k+1][1]
+        end_tide_level = slack_tides[k + 1][1]
 
         try:
             coeff = int(slack_tides[k][2])
@@ -83,20 +145,24 @@ def create_tide_curve(slack_tides):
         amplitude = (end_tide_level - start_tide_level) / 2
         frequency = np.pi / (start_timestamp - end_timestamp)
 
-        y_values = start_tide_level + amplitude * (1 + np.sin(frequency * (x_values - start_timestamp) - np.pi / 2))
+        y_values = start_tide_level + amplitude * (
+            1 + np.sin(frequency * (x_values - start_timestamp) - np.pi / 2)
+        )
 
         tide_x.extend(x_values_datetime[:-1])
         tide_y.extend(y_values[:-1])
-        coeff_list.extend([coeff] * (len(x_values)-1))
+        coeff_list.extend([coeff] * (len(x_values) - 1))
 
     full_tides = list(zip(tide_x, tide_y, coeff_list))
 
     return full_tides
 
 
+# =========================
 # Derives relevant tide slots from full tides
+# =========================
 
-def create_tide_slots (full_tides, surf_thresholds = (7.5, 10.8)):
+def create_tide_slots(full_tides, surf_thresholds=(7.5, 10.8)):
 
     intervals = []
     in_interval = False
@@ -108,14 +174,16 @@ def create_tide_slots (full_tides, surf_thresholds = (7.5, 10.8)):
                 in_interval = True
         else:
             if in_interval:
-                comment =f'Coeff. {coeff}'
+                comment = f'Coeff. {coeff}'
                 intervals.append((start_date, date, comment))
                 in_interval = False
 
     return intervals
 
 
+# =========================
 # Creates Google events
+# =========================
 
 def create_google_event(event_item, service, calendar_id):
 
@@ -123,26 +191,29 @@ def create_google_event(event_item, service, calendar_id):
         'summary': f'Tide window, {event_item[2]}',
         'start': {
             'dateTime': event_item[0].strftime('%Y-%m-%dT%H:%M:%S'),
-            'timeZone': 'Europe/Paris',
+            'timeZone': TIMEZONE,
         },
         'end': {
             'dateTime': event_item[1].strftime('%Y-%m-%dT%H:%M:%S'),
-            'timeZone': 'Europe/Paris',
+            'timeZone': TIMEZONE,
         },
-        'colorId': '7'}
+        'colorId': '7'
+    }
 
-    event = service.events().insert(calendarId=calendar_id, body=event).execute()
+    service.events().insert(calendarId=calendar_id, body=event).execute()
 
     print(f"Event @ {event_item[0].strftime('%Y-%m-%dT%H:%M')} successfully created")
 
     return None
 
+
 def post_google_event(event_slots, calendar_id):
 
-    scopes = ["https://www.googleapis.com/auth/calendar"]
-    flow = InstalledAppFlow.from_client_secrets_file("credentials.json", scopes)
-    creds = flow.run_local_server(port=0)
-    service = build("calendar", "v3", credentials=creds)
+    if not event_slots:
+        print("[INFO] No event slots to post.")
+        return None
+
+    service = get_calendar_service()
 
     for event in event_slots:
         create_google_event(event, service, calendar_id)
@@ -150,10 +221,23 @@ def post_google_event(event_slots, calendar_id):
     return None
 
 
-def main(start_date, calendar_id):
+# =========================
+# Main
+# =========================
 
-    start_date = dt.datetime.strptime(start_date, '%d/%m/%y')
-    num_days=10
+def main(start_date_str, calendar_id, num_days=10):
+
+    start_date = None
+
+    for fmt in ('%d/%m/%Y', '%d/%m/%y'):
+        try:
+            start_date = dt.datetime.strptime(start_date_str.strip(), fmt)
+            break
+        except ValueError:
+            pass
+
+    if start_date is None:
+        raise ValueError("start_date must be in format DD/MM/YYYY or DD/MM/YY")
 
     slack_tides = scrape_tides(start_date, num_days=num_days)
     full_tides = create_tide_curve(slack_tides)
@@ -164,6 +248,22 @@ def main(start_date, calendar_id):
 
 
 if __name__ == "__main__":
-    calendar_id = '2a075d8844c44bce6e2573676a195b31626de6e32649d7d93d0b5b06ddbdee1a@group.calendar.google.com'
-    input_date = sys.argv[1]
-    main(input_date, calendar_id)
+    calendar_id = DEFAULT_CALENDAR_ID
+
+    if len(sys.argv) < 2:
+        tomorrow = dt.date.today() + dt.timedelta(days=1)
+        input_date = tomorrow.strftime('%d/%m/%Y')
+        num_days = 10
+        print(f"[INFO] No arguments given, defaulting to {input_date} for {num_days} days.")
+    else:
+        input_date = sys.argv[1]
+
+        if len(sys.argv) >= 3:
+            try:
+                num_days = int(sys.argv[2])
+            except ValueError:
+                raise ValueError("NUM_DAYS must be an integer")
+        else:
+            num_days = 10
+
+    main(input_date, calendar_id, num_days=num_days)
