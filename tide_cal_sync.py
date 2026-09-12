@@ -109,8 +109,9 @@ def scrape_tides(start_date, num_days=10, harbor='SAINT-MALO'):
 
                     slack_tides.append((combined_datetime, tide_level, tide_coeff))
 
-        except Exception:
-            continue
+        except Exception as e:
+            print(f"[ERROR] Scraping failed for {date_obj.strftime('%Y-%m-%d')}: {e}")
+            break
 
     return slack_tides
 
@@ -162,7 +163,7 @@ def create_tide_curve(slack_tides):
 # Derives relevant tide slots from full tides
 # =========================
 
-def create_tide_slots(full_tides, surf_thresholds=(7.5, 10.8)):
+def create_tide_slots(full_tides, surf_thresholds=(7.5, 11.0)):
 
     intervals = []
     in_interval = False
